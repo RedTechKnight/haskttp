@@ -1,0 +1,6 @@
+packages: .
+
+source-repository-package
+        type: git
+        location: https://github.com/1Computer1/hectoparsec.git
+        tag: ca3553050a08984660cabc3089f4c8c3fc5cb92e
