@@ -15,49 +15,16 @@ main :: IO ()
 main = do
   runTestServer
  
-runTestClient :: (Socket -> IO ()) -> IO ()
-runTestClient f = do
+--runTestClient :: (Socket -> IO ()) -> IO ()
+runTestClient request responsePred makeErr = do
   sock <- socket AF_INET Stream defaultProtocol
   connect sock (SockAddrInet 4510 (tupleToHostAddress (127,0,0,1)))
-  f sock
+  send sock request
+  resp <- recv sock 4096
+  case resp of
+    (responsePred -> True) -> return ()
+    resp -> error $ makeErr resp 
   close sock
-
-getTestAbsent :: IO ()
-getTestAbsent = runTestClient $ \sock -> do
-  send sock "GET absentword\n"
-  resp <- recv sock 4096
-  case resp of
-    (C.isPrefixOf "ERROR" -> True) -> return ()
-    _ -> error (show (ResultMismatch "ERROR" (C.takeWhile (/=' ') resp)))
-
-getTestPresent :: IO ()
-getTestPresent = runTestClient $ \sock -> do
-  send sock "GET presentword\n"
-  resp <- recv sock 4096
-  case resp of
-    (C.isPrefixOf "ANSWER" -> True) -> return ()
-    _ -> error (show (ResultMismatch "ANSWER" (C.takeWhile (/=' ') resp)))
-
-setTest :: IO ()
-setTest = runTestClient $ \sock -> do
-  send sock "SET newword a new word\n"
-  resp <- recv sock 4096
-  case resp of
-    (C.isPrefixOf "SUCCESS" -> True) -> runTestClient $ \sock -> do
-      send sock "GET newword\n"
-      resp <- recv sock 4096
-      case resp of
-        (C.isPrefixOf "ANSWER" -> True) -> close sock >> return ()
-        _ -> error (show (ResultMismatch "ANSWER" (C.takeWhile (/=' ') resp)))
- 
-    _ -> error (show (ResultMismatch "SUCESS" (C.takeWhile (/=' ') resp)))
-
-
-
-exitTest :: IO ()
-exitTest = runTestClient $ \sock -> do
-  send sock "EXIT\n"
-  return ()
 
 runTestServer :: IO ()
 runTestServer = do
@@ -65,15 +32,72 @@ runTestServer = do
   bind sock (SockAddrInet 4510 (tupleToHostAddress (127,0,0,1)))
   listen sock 1
   dictServer <- async $ flip runStateT (Map.singleton "presentword" "A word that is present") . flip runReaderT sock . unwrapDictServer $ runDictServer
-  
-  getTestAbsent
-  getTestPresent
-  setTest
-  exitTest
+
+  runTestClient
+    "GET absentword\n"
+    (C.isPrefixOf "ERROR")
+    (show . ResultMismatch "ERROR" . (C.takeWhile (/=' ')))
+  runTestClient
+    "GET presentword\n"
+    (C.isPrefixOf "ANSWER")
+    (show . ResultMismatch "ANSWER" . (C.takeWhile (/=' ')))
+  runTestClient
+    "SET word\n"
+    (C.isPrefixOf "ErrorItemMessages")
+    (show . ResultMismatch "ErrorItemMessages" . (C.takeWhile (/=' ')))
+  runTestClient
+    "SET newword something new\n"
+    (C.isPrefixOf "SUCCESS")
+    (show . ResultMismatch "SUCESS" . (C.takeWhile (/=' ')))
+  runTestClient
+    "GET newword\n"
+    (C.isPrefixOf "ANSWER")
+    (show . ResultMismatch "ANSWER" . (C.takeWhile (/=' ')))
+  runTestClient
+    "REMOVE newword\n"
+    (C.isPrefixOf "SUCCESS")
+    (show . ResultMismatch "SUCESS" . (C.takeWhile (/=' ')))
+  runTestClient
+    "GET newword\n"
+    (C.isPrefixOf "ERROR")
+    (show . ResultMismatch "ERROR" . (C.takeWhile (/=' ')))
+  runTestClient
+    "SET wordA a word\n"
+    (C.isPrefixOf "SUCCESS")
+    (show . ResultMismatch "SUCCESS" . (C.takeWhile (/=' ')))
+  runTestClient
+    "SET wordB another word\n"
+    (C.isPrefixOf "SUCCESS")
+    (show . ResultMismatch "SUCCESS" . (C.takeWhile (/=' ')))
+  runTestClient
+    "SET wordC yet another word\n"
+    (C.isPrefixOf "SUCCESS")
+    (show . ResultMismatch "SUCCESS" . (C.takeWhile (/=' ')))
+  runTestClient
+    "ALL\n"
+    (allDefined ["presentword","wordA","wordB","wordC"] . filter (not . C.null) . fmap (C.takeWhile (/=':')). drop 1
+     . C.split '\n')
+    (show . ResultMismatch "Various definitions")
+  runTestClient
+    "CLEAR\n"
+    (C.isPrefixOf "SUCCESS")
+    (show . ResultMismatch "SUCESS" . C.takeWhile (/=' '))
+  runTestClient
+    "ALL\n"
+    (null . filter (not . C.null) . drop 1 . C.split '\n')
+    (\_ -> show $ ResultMismatch "Empty dictionary" "various definitions")
+  runTestClient
+    "EXIT\n"
+    (C.isPrefixOf "ENDED")
+    (show . ResultMismatch "ENDED" . (C.takeWhile (/=' ')))
   
   wait dictServer
   close sock
-  
+
+allDefined as bs = if length as == length bs
+  then and . fmap (uncurry (==)) $ zip as bs
+  else False
+
 data TestError a =
   ResultMismatch a a
 
