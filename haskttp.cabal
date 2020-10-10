@@ -28,6 +28,10 @@ executable haskttp
                      , hectoparsec
                      , errata == 0.2.0.0
                      , parser-combinators == 1.2.1
+                     , async == 2.2.2
+                     , monad-control == 1.0.2.3
+                     , lifted-async == 0.10.1.2
+                     , transformers-base == 0.4.5.2
   hs-source-dirs: src
               , src/Request
               
