@@ -19,37 +19,27 @@ import Control.Monad.Base
 import Request.Parser
 import Hectoparsec
 import Control.Concurrent.MVar
-import Control.Concurrent.Async.Lifted
-import Control.Arrow
+import qualified Control.Concurrent.Async.Lifted as L
+import Control.Concurrent.Async
+import Data.Either
+import Data.Maybe
+import Control.Exception
+import Data.Bifunctor
 
 
 type Dictionary = Map.Map ByteString ByteString
-newtype DictServer m a = DictServer {unwrapDictServer :: ReaderT (Socket,MVar Dictionary) m a}
-  deriving (Functor,Applicative,Monad,MonadReader (Socket,MVar Dictionary),MonadTrans)  
-instance MonadIO (DictServer IO) where
-  liftIO action = DictServer (ReaderT $ \r -> action)
-  
-instance MonadBase IO (DictServer IO) where
-  liftBase = liftBaseDefault
+newtype DictServer a = DictServer {runDictServer :: StateT [Async (())] (ReaderT (Socket,MVar Dictionary) IO) a}
+  deriving (Functor,Applicative,Monad,MonadReader (Socket,MVar Dictionary),MonadState [Async (())],MonadIO)  
 
-instance MonadTransControl DictServer where
-  type StT DictServer a = a
-  liftWith f = DictServer (ReaderT (\r -> f (\action -> runReaderT (unwrapDictServer action) r)))
-  restoreT action = DictServer (ReaderT (const action))
-
-instance MonadBaseControl IO (DictServer IO) where
-  type StM (DictServer IO) a = a
-  liftBaseWith f = DictServer (ReaderT (\r -> f (flip runReaderT r . unwrapDictServer)))
-  restoreM = DictServer . return
-
-runDictServer :: DictServer IO ()
-runDictServer  = asks fst
+run :: DictServer ()
+run  = asks fst
   >>= liftIO . accept
-  >>= \(conn,_) -> concurrently_ (local (const conn *** id) serveClient) runDictServer
-  
-serveClient :: DictServer IO ()
-serveClient = liftIO (print "Serving client...")
-  >> asks fst
+  >>= \(conn,_) -> DictServer (L.async (runDictServer (local (bimap (const conn) id) serveClient)) >>= modify . (:) . fmap fst)
+  >> get >>= liftIO . filterM (fmap (not . isJust) . poll) >>= put
+  >> run
+serveClient :: DictServer ()
+serveClient = 
+  asks fst
   >>= fmap parseRequest . (liftIO . flip recv 4096)
   >>= \case
   Right req -> handleMessage req >> case req of
@@ -57,7 +47,7 @@ serveClient = liftIO (print "Serving client...")
     _ -> serveClient
   Left err -> respond (C.pack $ show (parseErrorItem err)) >> serveClient
 
-handleMessage :: Request -> DictServer IO ()
+handleMessage :: Request -> DictServer ()
 handleMessage (Get key) = asks snd >>= liftIO . (flip withMVar (return . Map.lookup key)) >>= \case
   Nothing -> respond (fold ["ERROR key ",key," not found in dictionary.\n"]) >> pure ()
   Just value -> respond (fold ["ANSWER ",value,"\n"]) >> pure ()
@@ -79,6 +69,6 @@ handleMessage All = asks snd
   >> pure ()
 handleMessage Exit = respond "ENDED\n" >> asks fst >>= liftIO . close >> pure ()
 
-respond :: B.ByteString -> DictServer IO Int64
+respond :: B.ByteString -> DictServer Int64
 respond msg = asks fst >>= (liftIO . flip send msg) 
 
