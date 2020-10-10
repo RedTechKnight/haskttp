@@ -15,7 +15,7 @@ main :: IO ()
 main = do
   runTestServer
  
---runTestClient :: (Socket -> IO ()) -> IO ()
+runTestClient :: B.ByteString -> (B.ByteString -> Bool) -> (B.ByteString -> String) -> IO ()
 runTestClient request responsePred makeErr = do
   sock <- socket AF_INET Stream defaultProtocol
   connect sock (SockAddrInet 4510 (tupleToHostAddress (127,0,0,1)))
