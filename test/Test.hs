@@ -10,11 +10,20 @@ import qualified Data.Map.Lazy as Map
 import Control.Monad.Reader
 import Control.Monad.State.Lazy
 import Control.Concurrent.Async
+import Control.Concurrent.MVar
+import Request.Lexer
+import Request.Parser
+import Hectoparsec
+import Data.Either
+import Test.QuickCheck
 
 main :: IO ()
 main = do
+  quickCheck noLeftReturnedRequestParser
+  quickCheck noLeftReturnedRequestLexer
   runTestServer
- 
+
+
 runTestClient :: B.ByteString -> (B.ByteString -> Bool) -> (B.ByteString -> String) -> IO ()
 runTestClient request responsePred makeErr = do
   sock <- socket AF_INET Stream defaultProtocol
@@ -23,15 +32,18 @@ runTestClient request responsePred makeErr = do
   resp <- recv sock 4096
   case resp of
     (responsePred -> True) -> return ()
-    resp -> error $ makeErr resp 
+    resp -> error $ makeErr resp
+  send sock "EXIT\n"
+  _ <- recv sock 4096
   close sock
 
 runTestServer :: IO ()
 runTestServer = do
   sock <- socket AF_INET Stream defaultProtocol
   bind sock (SockAddrInet 4510 (tupleToHostAddress (127,0,0,1)))
+  dict <- newMVar (Map.singleton "presentword" "A word that is present")
   listen sock 1
-  dictServer <- async $ flip runStateT (Map.singleton "presentword" "A word that is present") . flip runReaderT sock . unwrapDictServer $ runDictServer
+  dictServer <- async . flip runReaderT (sock,dict) . flip runStateT [] . runDictServer $ run
 
   runTestClient
     "GET absentword\n"
@@ -41,10 +53,6 @@ runTestServer = do
     "GET presentword\n"
     (C.isPrefixOf "ANSWER")
     (show . ResultMismatch "ANSWER" . (C.takeWhile (/=' ')))
-  runTestClient
-    "SET word\n"
-    (C.isPrefixOf "ErrorItemMessages")
-    (show . ResultMismatch "ErrorItemMessages" . (C.takeWhile (/=' ')))
   runTestClient
     "SET newword something new\n"
     (C.isPrefixOf "SUCCESS")
@@ -86,14 +94,11 @@ runTestServer = do
     "ALL\n"
     (null . filter (not . C.null) . drop 1 . C.split '\n')
     (\_ -> show $ ResultMismatch "Empty dictionary" "various definitions")
-  runTestClient
-    "EXIT\n"
-    (C.isPrefixOf "ENDED")
-    (show . ResultMismatch "ENDED" . (C.takeWhile (/=' ')))
   
-  wait dictServer
+  cancel dictServer
   close sock
 
+allDefined :: [B.ByteString] -> [B.ByteString] -> Bool
 allDefined as bs = if length as == length bs
   then and . fmap (uncurry (==)) $ zip as bs
   else False
@@ -103,3 +108,13 @@ data TestError a =
 
 instance (Show a) => Show (TestError a) where
   show (ResultMismatch expect found) = mconcat ["Expected: ",show expect," --- Found: ",show found]
+
+noLeftReturnedRequestParser :: [RequestToken] -> Bool
+noLeftReturnedRequestParser = isRight . evalParser pRequest ""
+
+noLeftReturnedRequestLexer :: String -> Bool
+noLeftReturnedRequestLexer = isRight . evalParser pRequestToks "" . C.pack
+
+instance Arbitrary RequestToken where
+  arbitrary = oneof [return TGET,return TSET,return TCLEAR,return TREMOVE,return TALL,return TEXIT,(TWORD . C.pack) <$> arbitrary, TINVALID <$> arbitrary]
+  
