@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings,LambdaCase,ViewPatterns,GeneralizedNewtypeDeriving,MultiParamTypeClasses,TypeFamilies,FlexibleInstances,FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings,LambdaCase,ViewPatterns,GeneralizedNewtypeDeriving#-}
 module Server where
 import Network.Socket hiding (listen)
 import Network.Socket.ByteString.Lazy
@@ -9,66 +9,84 @@ import qualified Data.ByteString.Builder as B
 import Data.Map (Map(..))
 import qualified Data.Map as Map
 import Data.Foldable
+import Data.Either
+import Data.Maybe
+import Data.Bifunctor
 import Data.Int
 import Control.Monad.Reader
 import Control.Monad.State.Lazy
-import Control.Monad.Writer.Lazy as W hiding (All)
+import Control.Monad.Writer.Lazy hiding (All)
 import Control.Monad.Trans.Control
 import Control.Monad.Identity
 import Control.Monad.Base
-import Request.Parser
-import Hectoparsec
 import Control.Concurrent.MVar
 import qualified Control.Concurrent.Async.Lifted as L
 import Control.Concurrent.Async
-import Data.Either
-import Data.Maybe
 import Control.Exception
-import Data.Bifunctor
+import Request.Parser
+import Hectoparsec
 
 
 type Dictionary = Map.Map ByteString ByteString
-newtype DictServer a = DictServer {runDictServer :: StateT [Async (())] (ReaderT (Socket,MVar Dictionary) IO) a}
-  deriving (Functor,Applicative,Monad,MonadReader (Socket,MVar Dictionary),MonadState [Async (())],MonadIO)  
+newtype DictServer a = DictServer {runDictServer :: StateT [Async ()] (ReaderT (Socket,MVar Dictionary) IO) a}
+  deriving (Functor,Applicative,Monad,MonadReader (Socket,MVar Dictionary),MonadState [Async ()],MonadIO)  
 
+-- | Wait for a connection, accept it and serve the client in a seperate thread, wait for additional connections. 
 run :: DictServer ()
 run  = asks fst
   >>= liftIO . accept
   >>= \(conn,_) -> DictServer (L.async (runDictServer (local (bimap (const conn) id) serveClient)) >>= modify . (:) . fmap fst)
   >> get >>= liftIO . filterM (fmap (not . isJust) . poll) >>= put
   >> run
+
+-- | Receive a request from the client, give the appropriate response, until the EXIT command is used.
 serveClient :: DictServer ()
 serveClient = 
   asks fst
   >>= fmap parseRequest . (liftIO . flip recv 4096)
-  >>= \case
-  Right req -> handleMessage req >> case req of
+  >>= \req -> handleRequest req >> case req of
     Exit -> pure ()
     _ -> serveClient
-  Left err -> respond (C.pack $ show (parseErrorItem err)) >> serveClient
 
-handleMessage :: Request -> DictServer ()
-handleMessage (Get key) = asks snd >>= liftIO . (flip withMVar (return . Map.lookup key)) >>= \case
+-- | Performs the appropriate action based on the request received.
+handleRequest :: Request -> DictServer ()
+handleRequest (Get key) = asks snd >>= liftIO . (flip withMVar (return . Map.lookup key)) >>= \case
   Nothing -> respond (fold ["ERROR key ",key," not found in dictionary.\n"]) >> pure ()
   Just value -> respond (fold ["ANSWER ",value,"\n"]) >> pure ()
-handleMessage (Set key val) = asks snd
+handleRequest (Set key val) = asks snd
   >>= liftIO . (flip modifyMVar_ (return . Map.insert key val))
   >> respond "SUCCESS Key inserted successfully.\n"
   >> pure ()
-handleMessage Clear = asks snd
+handleRequest Clear = asks snd
   >>= liftIO . (flip modifyMVar_ (return . const Map.empty))
   >> respond "SUCCESS All dictionary entries erased.\n"
   >> pure ()
-handleMessage (Remove key) = asks snd
+handleRequest (Remove key) = asks snd
   >>= liftIO . (flip modifyMVar_ (return . (Map.delete key)))
   >> respond "SUCCESS Matching key removed from dictionary.\n"
   >> pure ()
-handleMessage All = asks snd
-  >>= liftIO . (flip withMVar (return . (B.toLazyByteString . (B.lazyByteString "ANSWER Displaying all entries in dictionary:\n" <>) . foldMap (\(k,v) -> B.lazyByteString k <> ": " <> B.lazyByteString v <> "\n")) . Map.toList))
+handleRequest All = asks snd
+  >>= liftIO . (flip withMVar (return . showAllDictContents))
   >>= respond
   >> pure ()
-handleMessage Exit = respond "ENDED\n" >> asks fst >>= liftIO . close >> pure ()
-
+handleRequest Exit =
+  respond "ENDED\n"
+  >> asks fst
+  >>= liftIO . close
+  >> pure ()
+handleRequest EmptyRequest =
+  respond "ERROR request empty or could not be parsed successfully\n"
+  >> pure ()
+handleRequest req@(BadRequest _ _) =
+  respond (reportBadReqError req)
+  >> pure ()
 respond :: B.ByteString -> DictServer Int64
 respond msg = asks fst >>= (liftIO . flip send msg) 
 
+showAllDictContents :: Map ByteString ByteString -> ByteString
+showAllDictContents map = (joinStrings $ "ANSWER Displaying all entries in dictionary:" : fmap showPair pairs) <> "\n"
+  where
+    pairs = Map.toList map
+    showPair (key,val) = key <> ": " <> val
+    joinStrings = B.intercalate "\n"
+  

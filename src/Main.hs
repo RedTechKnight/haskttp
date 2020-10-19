@@ -13,7 +13,7 @@ main :: IO ()
 main = do
   sock <- socket AF_INET Stream defaultProtocol
   bind sock (SockAddrInet 4510 (tupleToHostAddress (127,0,0,1)))
-  listen sock 1
+  listen sock 10
   dict <- newMVar (Map.singleton "word" "Just some letters")
   flip runReaderT (sock,dict) . flip runStateT [] .  runDictServer $ run
   close sock
