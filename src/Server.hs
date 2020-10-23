@@ -43,50 +43,9 @@ run  = asks fst
 serveClient :: DictServer ()
 serveClient = 
   asks fst
-  >>= fmap parseRequest . (liftIO . flip recv 4096)
-  >>= \req -> handleRequest req >> case req of
-    Exit -> pure ()
-    _ -> serveClient
+  >>= (liftIO . flip recv 4096)
+  >>= \req -> respond (C.pack . show $ parseRequest req) >> liftIO (print (show $ parseRequest req)) >> asks fst >>= liftIO . close 
 
--- | Performs the appropriate action based on the request received.
-handleRequest :: Request -> DictServer ()
-handleRequest (Get key) = asks snd >>= liftIO . (flip withMVar (return . Map.lookup key)) >>= \case
-  Nothing -> respond (fold ["ERROR key ",key," not found in dictionary.\n"]) >> pure ()
-  Just value -> respond (fold ["ANSWER ",value,"\n"]) >> pure ()
-handleRequest (Set key val) = asks snd
-  >>= liftIO . (flip modifyMVar_ (return . Map.insert key val))
-  >> respond "SUCCESS Key inserted successfully.\n"
-  >> pure ()
-handleRequest Clear = asks snd
-  >>= liftIO . (flip modifyMVar_ (return . const Map.empty))
-  >> respond "SUCCESS All dictionary entries erased.\n"
-  >> pure ()
-handleRequest (Remove key) = asks snd
-  >>= liftIO . (flip modifyMVar_ (return . (Map.delete key)))
-  >> respond "SUCCESS Matching key removed from dictionary.\n"
-  >> pure ()
-handleRequest All = asks snd
-  >>= liftIO . (flip withMVar (return . showAllDictContents))
-  >>= respond
-  >> pure ()
-handleRequest Exit =
-  respond "ENDED\n"
-  >> asks fst
-  >>= liftIO . close
-  >> pure ()
-handleRequest EmptyRequest =
-  respond "ERROR request empty or could not be parsed successfully\n"
-  >> pure ()
-handleRequest req@(BadRequest _ _) =
-  respond (reportBadReqError req)
-  >> pure ()
+
 respond :: B.ByteString -> DictServer Int64
 respond msg = asks fst >>= (liftIO . flip send msg) 
-
-showAllDictContents :: Map ByteString ByteString -> ByteString
-showAllDictContents map = (joinStrings $ "ANSWER Displaying all entries in dictionary:" : fmap showPair pairs) <> "\n"
-  where
-    pairs = Map.toList map
-    showPair (key,val) = key <> ": " <> val
-    joinStrings = B.intercalate "\n"
-  
