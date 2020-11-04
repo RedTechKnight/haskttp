@@ -23,9 +23,9 @@ import Control.Concurrent.MVar
 import qualified Control.Concurrent.Async.Lifted as L
 import Control.Concurrent.Async
 import Control.Exception
+import Request.Lexer
 import Request.Parser
 import Hectoparsec
-
 
 type Dictionary = Map.Map ByteString ByteString
 newtype DictServer a = DictServer {runDictServer :: StateT [Async ()] (ReaderT (Socket,MVar Dictionary) IO) a}
@@ -37,14 +37,19 @@ run  = asks fst
   >>= liftIO . accept
   >>= \(conn,_) -> DictServer (L.async (runDictServer (local (bimap (const conn) id) serveClient)) >>= modify . (:) . fmap fst)
   >> get >>= liftIO . filterM (fmap (not . isJust) . poll) >>= put
-  >> run
+  >> Server.run
 
 -- | Receive a request from the client, give the appropriate response, until the EXIT command is used.
 serveClient :: DictServer ()
 serveClient = 
   asks fst
   >>= (liftIO . flip recv 4096)
-  >>= \req -> respond (C.pack . show $ parseRequest req) >> liftIO (print (show $ parseRequest req)) >> asks fst >>= liftIO . close 
+  >>= \req -> liftIO (B.putStr req >> B.putStr "\n")
+  >> liftIO (B.writeFile "out" req)
+  >> ((liftIO . print) $ evalParser pRequestToks "" req)
+  >> respond (C.pack . show $ parseRequest req)
+  >> liftIO (putStrLn (show $ parseRequest req))
+  >> asks fst >>= liftIO . close 
 
 
 respond :: B.ByteString -> DictServer Int64
