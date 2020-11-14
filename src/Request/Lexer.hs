@@ -14,30 +14,25 @@ type RequestLexer = Parser ByteString Void String
 data RequestToken =
   TWORD ByteString
   |TKEY ByteString
-  |TEOL deriving (Eq,Show)
+  |TEOL
+  deriving (Eq,Show)
 
 pRequestToks :: RequestLexer [RequestToken]
-pRequestToks = removeEmptyLines <$> some (try pKeyTok <|> try pWordTok <|> pEOLTok)
-
-removeEmptyLines :: [RequestToken] -> [RequestToken]
-removeEmptyLines = unlines . filter (not . null) . lines
-  where
-    lines [] = []
-    lines xs = let (line,rest) = span (/= TEOL) xs in line : (lines (drop 1 rest))
-    unlines [] = []
-    unlines (x:[]) = x
-    unlines (x:xs) = x <> (TEOL : unlines xs)
+pRequestToks = some (try pKeyTok <|> try pWordTok <|> pEOLTok)
 
 pKeyTok :: RequestLexer RequestToken
 pKeyTok = many pSpace *>
   (TKEY <$> tokenWhile1 ((not . flip elem [' ','\r','\n',':']) . chr . fromIntegral))
   <* char (fromIntegral . ord $ ':')
-  <* (try (void $ some pSpace))
+  <* (void $ some pSpace)
 
 pWordTok :: RequestLexer RequestToken
 pWordTok = many pSpace
   *> (TWORD <$> tokenWhile1 ((not . flip elem [' ','\r','\n']) . chr . fromIntegral))
   <* (try (void $ some pSpace) <|> try (void (lookahead pEOLTok)) <|> endOfInput)
+
+pInt :: RequestLexer Int
+pInt = read . C.unpack <$> tokenWhile1 (flip elem ['0'..'9'] . chr . fromIntegral) 
 
 pEOLTok :: RequestLexer RequestToken
 pEOLTok = TEOL <$ (optional (string "\r") *> (string "\n"))
