@@ -1,101 +1,126 @@
-{-# LANGUAGE OverloadedStrings,LambdaCase,ViewPatterns,GeneralizedNewtypeDeriving#-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE OverloadedStrings #-}
+
 module Server where
-import Network.Socket hiding (listen)
-import Network.Socket.ByteString.Lazy
-import Data.ByteString.Lazy (ByteString(..))
-import qualified Data.ByteString.Lazy.Char8 as C
-import qualified Data.ByteString.Lazy as B
-import qualified Data.ByteString.Builder as B
-import Data.Map (Map(..))
-import qualified Data.Map as Map
-import Data.Foldable
-import Data.Either
-import Data.Maybe
-import Data.Bifunctor
-import Data.Int
+
+import Control.Concurrent.Async (Async, poll)
+import Control.Concurrent.Async.Lifted (async)
+import Control.Monad.Identity (filterM, void)
 import Control.Monad.Reader
+  ( MonadIO (..),
+    MonadReader (ask, local),
+    ReaderT,
+  )
 import Control.Monad.State.Lazy
-import Control.Monad.Writer.Lazy hiding (All)
-import Control.Monad.Trans.Control
-import Control.Monad.Identity
-import Control.Monad.Base
-import qualified Control.Concurrent.Async.Lifted as L
-import Control.Concurrent.Async
-import Control.Exception
-import System.IO.Error
-import Request.Lexer
+  ( MonadState (get, put),
+    StateT (StateT),
+    modify,
+  )
+import Data.ByteString.Lazy (ByteString (..))
+import qualified Data.ByteString.Lazy as B
+import qualified Data.ByteString.Lazy.Char8 as C
+import qualified Data.Map as Map
+import Data.Maybe (isNothing)
+import Network.Socket (Socket, accept, close)
+import qualified Network.Socket.ByteString.Lazy as N
 import Request.Parser
-import Hectoparsec
+  ( Method (GET),
+    Request (..),
+    parseRequest,
+  )
+import System.IO.Error (tryIOError)
 
 newtype HTTPServer a = HTTPServer {runHttpServer :: StateT [Async ()] (ReaderT Socket IO) a}
-  deriving (Functor,Applicative,Monad,MonadReader Socket,MonadState [Async ()],MonadIO)
+  deriving (Functor, Applicative, Monad, MonadReader Socket, MonadState [Async ()], MonadIO)
 
--- | Wait for a connection, accept it and serve the client in a seperate thread, wait for additional connections.
+-- | Wait for a connection, accept it and serve the client in a seperate thread, wait for additional connections. Current implmentation requires server to be terminated externally.
 httpServer :: HTTPServer ()
-httpServer  = ask
-  >>= liftIO . accept
-  >>= \(conn,_) -> HTTPServer (L.async (runHttpServer (local (const conn) serveClient)) >>= modify . (:) . fmap fst)
-  >> get >>= liftIO . filterM (fmap (not . isJust) . poll) >>= put
-  >> httpServer
+httpServer = do
+  (conn, _) <- ask >>= liftIO . accept
+  launchClientThread conn
+  removeCompletedThreads
+  httpServer
+
+removeCompletedThreads :: HTTPServer ()
+removeCompletedThreads = get >>= liftIO . filterM (fmap isNothing . poll) >>= put
+
+launchClientThread :: Socket -> HTTPServer ()
+launchClientThread conn = do
+  client <- HTTPServer $ async (runHttpServer (local (const conn) serveClient))
+  modify . (:) . fmap fst $ client
 
 -- | Receive a request from the client and then give the appropriate response.
 serveClient :: HTTPServer ()
-serveClient =
-  ask
-  >>= (liftIO . flip recv 4096)
-  >>= \req -> (case parseRequest req of
-                Left _ -> (respond . httpResponse) responseInvalidRequest
-                Right req -> handleRequest req)
-  >> ask >>= liftIO . close
+serveClient = do
+  sock <- ask
+  reqBs <- liftIO . N.getContents $ sock
+  case parseRequest reqBs of
+    Left err ->
+      let message = C.pack . show $ err
+          contentLen = C.length message
+          hs =
+            Map.fromList
+              [ ("Server", "haskttp"),
+                ("Content-Type", "text/plain"),
+                ("Content-Length", C.pack . show $ contentLen)
+              ]
+       in (respond . httpResponse) responseInvalidRequest {body = message, headers = hs}
+    Right req -> handleRequest req
+  liftIO . close $ sock
 
 handleRequest :: Request -> HTTPServer ()
-handleRequest (Request GET file _ _) = (liftIO . tryIOError . B.readFile . C.unpack . B.append hostFileDir $ file) >>= \case
-  Left _ -> (respond . httpResponse) responseNotFound
-  Right contents -> (respond . httpResponse) $
-    Response
-    "HTTP/1.0"
-    200
-    "Ok"
-    (Headers (Map.fromList
-              [("Content-Length",C.pack . show . B.length $ contents)
-              ,("Content-Type","text/plain")
-              ,("Server","haskttp")]))
-    contents
-handleRequest (Request HEAD file _ _) = (liftIO . tryIOError . B.readFile . C.unpack . B.append hostFileDir $ file) >>= \case
-  Left _ -> let (Response vers status desc headers _) = responseNotFound in (respond . httpResponse) (Response vers status desc headers "")
-  Right contents -> (respond . httpResponse) $
-    Response
-    "HTTP/1.0"
-    200
-    "Ok"
-    (Headers (Map.fromList
-              [("Content-Length",C.pack . show . B.length $ contents)
-              ,("Content-Type","text/plain")
-              ,("Server","haskttp")]))
-    ""
-handleRequest _ = (respond . httpResponse) responseMethUnsupported 
+handleRequest (Request GET file _ _) = do
+  file <- liftIO . tryIOError . B.readFile . C.unpack $ (hostedFileDir <> file)
+  case file of
+    Left _ -> (respond . httpResponse) responseNotFound
+    Right contents ->
+      let hs =
+            Map.fromList
+              [ ("Content-Type", "text/plain"),
+                ("Content-Length", C.pack . show . C.length $ contents)
+              ]
+       in (respond . httpResponse) responseOk {headers = hs, body = contents}
+handleRequest _ = (respond . httpResponse) responseMethUnsupported
 
 respond :: ByteString -> HTTPServer ()
-respond msg = ask >>= (void . liftIO . flip send msg)
+respond msg = ask >>= void . liftIO . flip N.send msg
 
-hostFileDir = "www"
+hostedFileDir :: ByteString
+hostedFileDir = "www"
 
 data Response = Response
-  ByteString
-  Int
-  ByteString
-  Headers
-  ByteString
+  { version :: ByteString,
+    statusCode :: Int,
+    statusDesc :: ByteString,
+    headers :: Map.Map ByteString ByteString,
+    body :: ByteString
+  }
 
 httpResponse :: Response -> ByteString
 httpResponse (Response vers status statusDesc headers body) =
   vers <> " "
-  <> (C.pack . show $ status) <> " "
-  <> statusDesc <> "\r\n"
-  <> (C.pack . show $ headers) <> "\r\n"
-  <> body <> "\r\n"
+    <> (C.pack . show $ status)
+    <> " "
+    <> statusDesc
+    <> "\r\n"
+    <> showHeaders headers
+    <> "\r\n"
+    <> body
+    <> "\r\n"
 
+responseMethUnsupported :: Response
+responseMethUnsupported = Response "HTTP/1.0" 501 "Not Implemented" Map.empty "The method used is not supported by the server."
 
-responseMethUnsupported = Response "HTTP/1.0" 501 "Not Implemented" (Headers Map.empty) "The method used is not supported by the server."
-responseInvalidRequest = Response "HTTP/1.0" 400 "Bad Request" (Headers Map.empty) "The request received was ill-formed."
-responseNotFound = Response "HTTP/1.0" 404 "Not Found" (Headers Map.empty) "The requested resource could not be located."
+responseInvalidRequest :: Response
+responseInvalidRequest = Response "HTTP/1.0" 400 "Bad Request" Map.empty "The request received was ill-formed."
+
+responseNotFound :: Response
+responseNotFound = Response "HTTP/1.0" 404 "Not Found" Map.empty "The requested resource could not be located."
+
+responseOk :: Response
+responseOk = Response "HTTP/1.0" 200 "Ok" Map.empty ""
+
+showHeaders :: Map.Map ByteString ByteString -> ByteString
+showHeaders = foldMap (uncurry showElem) . Map.toList
+  where
+    showElem k v = k <> ": " <> v <> "\r\n"

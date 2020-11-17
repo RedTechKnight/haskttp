@@ -1,41 +1,51 @@
-{-# LANGUAGE OverloadedStrings,LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+
 module Request.Lexer where
-import Hectoparsec
-import Data.ByteString.Lazy (ByteString(..))
-import qualified Data.ByteString.Lazy as B
-import qualified Data.ByteString.Lazy.Char8 as C
-import Data.Void
-import Data.Char
+
 import Control.Applicative.Combinators
-import Data.Functor
+  ( many,
+    optional,
+    some,
+    (<|>),
+  )
+import Data.ByteString.Lazy (ByteString (..))
+import Data.Char (chr, ord)
+import Data.Functor (void)
+import Data.Void (Void)
+import Hectoparsec
+  ( MonadParser (endOfInput, lookahead, try),
+    Parser,
+    char,
+    string,
+    tokenWhile1,
+  )
 
 type RequestLexer = Parser ByteString Void String
 
-data RequestToken =
-  TWORD ByteString
-  |TKEY ByteString
-  |TEOL
-  deriving (Eq,Show)
+data RequestToken
+  = TWORD ByteString
+  | TKEY ByteString
+  | TEOL
+  deriving (Eq, Show)
 
 pRequestToks :: RequestLexer [RequestToken]
 pRequestToks = some (try pKeyTok <|> try pWordTok <|> pEOLTok)
 
 pKeyTok :: RequestLexer RequestToken
-pKeyTok = many pSpace *>
-  (TKEY <$> tokenWhile1 ((not . flip elem [' ','\r','\n',':']) . chr . fromIntegral))
-  <* char (fromIntegral . ord $ ':')
-  <* (void $ some pSpace)
+pKeyTok =
+  many pSpace
+    *> (TKEY <$> tokenWhile1 ((not . flip elem [' ', '\r', '\n', ':']) . chr . fromIntegral))
+    <* char (fromIntegral . ord $ ':')
+    <* (void . some $ pSpace)
 
 pWordTok :: RequestLexer RequestToken
-pWordTok = many pSpace
-  *> (TWORD <$> tokenWhile1 ((not . flip elem [' ','\r','\n']) . chr . fromIntegral))
-  <* (try (void $ some pSpace) <|> try (void (lookahead pEOLTok)) <|> endOfInput)
-
-pInt :: RequestLexer Int
-pInt = read . C.unpack <$> tokenWhile1 (flip elem ['0'..'9'] . chr . fromIntegral) 
+pWordTok =
+  many pSpace
+    *> (TWORD <$> tokenWhile1 ((not . flip elem [' ', '\r', '\n']) . chr . fromIntegral))
+    <* (try (void $ some pSpace) <|> try (void (lookahead pEOLTok)) <|> endOfInput)
 
 pEOLTok :: RequestLexer RequestToken
-pEOLTok = TEOL <$ (optional (string "\r") *> (string "\n"))
+pEOLTok = TEOL <$ (optional (string "\r") *> string "\n")
 
 pSpace :: RequestLexer ()
 pSpace = void $ char (fromIntegral . ord $ ' ')
