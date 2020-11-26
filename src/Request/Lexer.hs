@@ -9,6 +9,7 @@ import Control.Applicative.Combinators
     (<|>),
   )
 import Data.ByteString.Lazy (ByteString (..))
+import qualified Data.ByteString.Lazy.Char8 as C
 import Data.Char (chr, ord)
 import Data.Functor (void)
 import Data.Void (Void)
@@ -18,6 +19,7 @@ import Hectoparsec
     char,
     string,
     tokenWhile1,
+    anyToken
   )
 
 type RequestLexer = Parser ByteString Void String
@@ -26,10 +28,14 @@ data RequestToken
   = TWORD ByteString
   | TKEY ByteString
   | TEOL
+  | TINVAL
   deriving (Eq, Show)
 
 pRequestToks :: RequestLexer [RequestToken]
-pRequestToks = some (try pKeyTok <|> try pWordTok <|> pEOLTok)
+pRequestToks = some (try pKeyTok <|> try pWordTok <|> try pEOLTok <|> pInvalTok)
+
+pInvalTok :: RequestLexer RequestToken
+pInvalTok = TINVAL <$ anyToken
 
 pKeyTok :: RequestLexer RequestToken
 pKeyTok =
@@ -49,3 +55,8 @@ pEOLTok = TEOL <$ (optional (string "\r") *> string "\n")
 
 pSpace :: RequestLexer ()
 pSpace = void $ char (fromIntegral . ord $ ' ')
+
+prettyPrintTok :: RequestToken -> String
+prettyPrintTok TEOL = "\r\n"
+prettyPrintTok (TWORD w) = C.unpack w
+prettyPrintTok (TKEY w) = C.unpack w <> ":"
