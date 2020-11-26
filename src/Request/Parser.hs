@@ -88,6 +88,24 @@ pWord = matchToken $ \case
   Just t -> Left (ErrorItemLabels (UnexpectedToken t) ["Word"])
   Nothing -> Left (ErrorItemLabels UnexpectedEnd ["Word"])
 
+showHeaders :: Map.Map ByteString ByteString -> ByteString
+showHeaders = foldMap (uncurry showElem) . Map.toList
+  where
+    showElem k v = k <> ": " <> v <> "\r\n"
+
+prettyPrintRequest :: Request -> String
+prettyPrintRequest (Request meth res v headers) =
+  mconcat
+    [ show meth,
+      " ",
+      C.unpack res,
+      " ",
+      C.unpack v,
+      "\r\n",
+      C.unpack $ showHeaders headers,
+      "\r\n"
+    ]
+
 instance Stream [a] where
   type Chunk [a] = [a]
   type Token [a] = a
