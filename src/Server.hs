@@ -5,7 +5,7 @@ module Server where
 
 import Control.Concurrent.Async (Async, poll)
 import Control.Concurrent.Async.Lifted (async)
-import Control.Monad.Identity (filterM, void)
+import Control.Monad (filterM, void)
 import Control.Monad.Reader
   ( MonadIO (..),
     MonadReader (ask, local),
@@ -27,8 +27,10 @@ import Request.Parser
   ( Method (GET),
     Request (..),
     parseRequest,
+    showHeaders
   )
 import System.IO.Error (tryIOError)
+import Data.ByteString.Builder.Extra (defaultChunkSize)
 
 newtype HTTPServer a = HTTPServer {runHttpServer :: StateT [Async ()] (ReaderT Socket IO) a}
   deriving (Functor, Applicative, Monad, MonadReader Socket, MonadState [Async ()], MonadIO)
@@ -47,13 +49,21 @@ removeCompletedThreads = get >>= liftIO . filterM (fmap isNothing . poll) >>= pu
 launchClientThread :: Socket -> HTTPServer ()
 launchClientThread conn = do
   client <- HTTPServer $ async (runHttpServer (local (const conn) serveClient))
-  modify . (:) . fmap fst $ client
+  modify ((fst <$> client) : )
+
+recvAll :: Socket -> IO ByteString
+recvAll sock = do
+  bs <- N.recv sock $ fromIntegral defaultChunkSize
+  if B.length bs < fromIntegral defaultChunkSize then 
+    pure bs
+  else 
+    (bs <>) <$> recvAll sock
 
 -- | Receive a request from the client and then give the appropriate response.
 serveClient :: HTTPServer ()
 serveClient = do
   sock <- ask
-  reqBs <- liftIO . N.getContents $ sock
+  reqBs <- liftIO . recvAll $ sock
   case parseRequest reqBs of
     Left err ->
       let message = C.pack . show $ err
@@ -76,7 +86,8 @@ handleRequest (Request GET file _ _) = do
     Right contents ->
       let hs =
             Map.fromList
-              [ ("Content-Type", "text/plain"),
+              [ ("Server","haskttp"),
+                ("Content-Type", "text/plain"),
                 ("Content-Length", C.pack . show . C.length $ contents)
               ]
        in (respond . httpResponse) responseOk {headers = hs, body = contents}
@@ -120,7 +131,3 @@ responseNotFound = Response "HTTP/1.0" 404 "Not Found" Map.empty "The requested 
 responseOk :: Response
 responseOk = Response "HTTP/1.0" 200 "Ok" Map.empty ""
 
-showHeaders :: Map.Map ByteString ByteString -> ByteString
-showHeaders = foldMap (uncurry showElem) . Map.toList
-  where
-    showElem k v = k <> ": " <> v <> "\r\n"
